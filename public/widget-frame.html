@@ -376,6 +376,17 @@
     #screen-voice .v-hint      { font-size:11px; color:#b8cdc0; letter-spacing:.02em; min-height:15px; }
     #screen-voice .switch-link { font-size:11px; color:#9db8a5; background:none; border:none; cursor:pointer; padding:4px 0; letter-spacing:.02em; transition:color .15s; }
     #screen-voice .switch-link:hover { color:#16a34a; }
+    .v-img-row { display:flex; align-items:center; gap:7px; width:100%; }
+    .v-img-input {
+      flex:1; border:1.5px solid #e2ece6; border-radius:20px;
+      padding:8px 13px; font-size:12px; font-family:inherit;
+      color:#1a3a24; background:#f8fdf9; outline:none;
+      transition:border-color .2s;
+    }
+    .v-img-input:focus { border-color:#16a34a; }
+    .v-img-input::placeholder { color:#b8cdc0; }
+    .v-img-preview-row { display:none; align-items:center; gap:8px; width:100%; }
+    .v-img-preview-row.show { display:flex; }
   </style>
 </head>
 <body>
@@ -453,6 +464,20 @@
 
     <div class="v-controls">
       <div class="v-hint" id="vHint"></div>
+      <div class="v-img-preview-row" id="vImgPreviewRow">
+        <img class="img-preview-thumb" id="vImgPreviewThumb" src="" alt="preview">
+        <button class="img-preview-remove" id="vImgPreviewRemove">×</button>
+      </div>
+      <div class="v-img-row">
+        <input type="file" id="vImgFileInput" accept="image/*" style="display:none">
+        <button class="upload-btn" id="vUploadBtn" title="Ladda upp bild">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+        </button>
+        <input class="v-img-input" id="vImgInput" type="text" placeholder="Beskriv ändringarna…">
+        <button class="send-btn" id="vImgSendBtn" disabled>
+          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
       <button class="switch-link" id="toChat">Byt till chat</button>
     </div>
     <div class="footer">Powered by <strong>WidgetSell</strong></div>
@@ -895,6 +920,87 @@
       setVState('idle');
     }
   }
+
+  // ── Voice image upload ─────────────────────────────────────
+  const vImgFileInput    = document.getElementById('vImgFileInput');
+  const vUploadBtn       = document.getElementById('vUploadBtn');
+  const vImgPreviewRow   = document.getElementById('vImgPreviewRow');
+  const vImgPreviewThumb = document.getElementById('vImgPreviewThumb');
+  const vImgPreviewRemove = document.getElementById('vImgPreviewRemove');
+  const vImgInput        = document.getElementById('vImgInput');
+  const vImgSendBtn      = document.getElementById('vImgSendBtn');
+  let vSelectedImage = null;
+
+  vUploadBtn.addEventListener('click', () => vImgFileInput.click());
+
+  vImgFileInput.addEventListener('change', () => {
+    const file = vImgFileInput.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const dataUrl = e.target.result;
+      vSelectedImage = { base64: dataUrl.split(',')[1], mimeType: file.type || 'image/jpeg', dataUrl };
+      vImgPreviewThumb.src = dataUrl;
+      vImgPreviewRow.classList.add('show');
+      vImgSendBtn.disabled = false;
+    };
+    reader.readAsDataURL(file);
+    vImgFileInput.value = '';
+  });
+
+  vImgPreviewRemove.addEventListener('click', () => {
+    vSelectedImage = null;
+    vImgPreviewRow.classList.remove('show');
+    vImgPreviewThumb.src = '';
+    vImgSendBtn.disabled = !vImgInput.value.trim();
+  });
+
+  vImgInput.addEventListener('input', () => {
+    vImgSendBtn.disabled = !vImgInput.value.trim() && !vSelectedImage;
+  });
+
+  vImgSendBtn.addEventListener('click', async () => {
+    const text = vImgInput.value.trim();
+    if (!vSelectedImage) return;
+    const img = vSelectedImage; vSelectedImage = null;
+    vImgPreviewRow.classList.remove('show'); vImgPreviewThumb.src = '';
+    vImgInput.value = ''; vImgSendBtn.disabled = true;
+
+    addVLine(text || 'Renovera detta rum', 'user');
+    stopAll();
+    setVState('thinking');
+
+    try {
+      const r = await fetch('/api/imagine', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: img.base64, mimeType: img.mimeType, prompt: text || 'Renovera detta rum' })
+      });
+      const data = await r.json();
+      if (data.imageBase64) {
+        const row = document.createElement('div'); row.className = 'row bot';
+        const av = document.createElement('div'); av.className = 'row-av'; av.innerHTML = '<img src="/victoria.jpg" alt="Victoria">';
+        const b = document.createElement('div'); b.className = 'bubble';
+        const imgEl = document.createElement('img'); imgEl.src = `data:${data.mimeType};base64,${data.imageBase64}`; imgEl.className = 'bubble-img';
+        b.appendChild(imgEl); row.appendChild(av); row.appendChild(b);
+        transcriptEl.appendChild(row); transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+        const ctxMsg = `Kunden laddade upp en bild med renoveringsbegäran: "${text || 'renovera rummet'}". Du har genererat en visualisering. Kommentera kort resultatet och fråga vad de tycker.`;
+        vHistory.push({ role: 'user', content: ctxMsg });
+        const reply = await streamToBotLine(vHistory);
+        if (reply) {
+          vHistory.push({ role: 'assistant', content: reply });
+          setVState('speaking');
+          await speak(reply);
+          startRecording(true);
+        } else { setVState('idle'); }
+      } else {
+        addVLine('Kunde inte generera bilden.', 'bot');
+        setVState('idle');
+      }
+    } catch {
+      addVLine('Bildgenerering misslyckades.', 'bot');
+      setVState('idle');
+    }
+  });
 
   // ── Chat mode ──────────────────────────────────────────────
   const messagesEl = document.getElementById('messages');
