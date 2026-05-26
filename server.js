@@ -301,6 +301,41 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+app.post('/api/imagine', express.json({ limit: '25mb' }), async (req, res) => {
+  const { imageBase64, mimeType, prompt } = req.body;
+  if (!imageBase64 || !prompt) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: mimeType || 'image/jpeg', data: imageBase64 } },
+              { text: `You are an interior design visualizer. Edit this room image based on the following renovation request. Preserve the room's layout, perspective, and proportions. Apply the changes realistically. Request: ${prompt}` }
+            ]
+          }],
+          generationConfig: { responseModalities: ['IMAGE'] }
+        })
+      }
+    );
+
+    const data = await r.json();
+    const imgPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (!imgPart) {
+      console.error('Gemini imagine error:', JSON.stringify(data));
+      return res.status(500).json({ error: 'No image returned' });
+    }
+    res.json({ imageBase64: imgPart.inlineData.data, mimeType: imgPart.inlineData.mimeType });
+  } catch (e) {
+    console.error('Imagine error:', e.message);
+    res.status(500).json({ error: 'Image generation failed' });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n✓  WidgetSell → http://localhost:${PORT}\n`);

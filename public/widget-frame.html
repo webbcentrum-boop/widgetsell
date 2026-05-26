@@ -250,6 +250,26 @@
     .send-btn:active:not(:disabled) { transform: scale(.92); }
     .send-btn:disabled { opacity: .2; cursor: default; }
     .send-btn svg { width: 15px; height: 15px; fill: #fff; }
+    .upload-btn {
+      width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid #e2ece6;
+      background: transparent; cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #9db8a5; transition: all .15s; padding: 0;
+    }
+    .upload-btn:hover { background: #f0fdf4; border-color: #bbf7d0; color: #16a34a; }
+    .img-preview-wrap {
+      display: none; align-items: center; gap: 8px;
+      padding: 6px 14px 0;
+    }
+    .img-preview-wrap.show { display: flex; }
+    .img-preview-thumb { width: 52px; height: 52px; border-radius: 10px; object-fit: cover; border: 1.5px solid #bbf7d0; }
+    .img-preview-remove {
+      width: 20px; height: 20px; border-radius: 50%; border: none;
+      background: #e11d48; color: #fff; font-size: 14px; line-height: 1;
+      cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; flex-shrink: 0;
+    }
+    .bubble-img { max-width: 200px; border-radius: 10px; display: block; border: 1px solid #dcfce7; }
+    .bubble-img-user { max-width: 180px; border-radius: 10px; display: block; margin-bottom: 4px; }
   </style>
 
   <!-- ── Voice screen — premium white/green ── -->
@@ -453,7 +473,15 @@
       </div>
     </div>
     <div class="messages" id="messages"></div>
+    <div class="img-preview-wrap" id="imgPreviewWrap">
+      <img class="img-preview-thumb" id="imgPreviewThumb" src="" alt="preview">
+      <button class="img-preview-remove" id="imgPreviewRemove">×</button>
+    </div>
     <div class="input-area">
+      <input type="file" id="imgFileInput" accept="image/*" style="display:none">
+      <button class="upload-btn" id="uploadBtn" title="Ladda upp bild">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+      </button>
       <input class="input-field" id="chatInput" type="text" placeholder="Skriv ett meddelande…" autocomplete="off"/>
       <button class="send-btn" id="sendBtn" disabled>
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -929,12 +957,96 @@
     chatBusy = false; sendBtn.disabled = !chatInput.value.trim(); chatInput.focus();
   }
 
+  // ── Image upload ──────────────────────────────────────────────
+  const imgFileInput    = document.getElementById('imgFileInput');
+  const uploadBtn       = document.getElementById('uploadBtn');
+  const imgPreviewWrap  = document.getElementById('imgPreviewWrap');
+  const imgPreviewThumb = document.getElementById('imgPreviewThumb');
+  const imgPreviewRemove = document.getElementById('imgPreviewRemove');
+  let selectedImage = null;
+
+  uploadBtn.addEventListener('click', () => imgFileInput.click());
+
+  imgFileInput.addEventListener('change', () => {
+    const file = imgFileInput.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      const dataUrl = e.target.result;
+      selectedImage = { base64: dataUrl.split(',')[1], mimeType: file.type || 'image/jpeg', dataUrl };
+      imgPreviewThumb.src = dataUrl;
+      imgPreviewWrap.classList.add('show');
+      sendBtn.disabled = false;
+      chatInput.focus();
+    };
+    reader.readAsDataURL(file);
+    imgFileInput.value = '';
+  });
+
+  imgPreviewRemove.addEventListener('click', () => {
+    selectedImage = null;
+    imgPreviewWrap.classList.remove('show');
+    imgPreviewThumb.src = '';
+    sendBtn.disabled = !chatInput.value.trim();
+  });
+
+  function addUserImageBubble(dataUrl, text) {
+    const row = document.createElement('div'); row.className = 'row user';
+    const b = document.createElement('div'); b.className = 'bubble';
+    const img = document.createElement('img'); img.src = dataUrl; img.className = 'bubble-img-user';
+    b.appendChild(img);
+    if (text) { const t = document.createElement('div'); t.textContent = text; b.appendChild(t); }
+    row.appendChild(b); messagesEl.appendChild(row); scrollBottom();
+  }
+
+  function addBotImageBubble(base64, mimeType) {
+    const row = document.createElement('div'); row.className = 'row bot';
+    const av = document.createElement('div'); av.className = 'row-av'; av.innerHTML = '<img src="/victoria.jpg" alt="Victoria">';
+    const b = document.createElement('div'); b.className = 'bubble';
+    const img = document.createElement('img'); img.src = `data:${mimeType};base64,${base64}`; img.className = 'bubble-img';
+    b.appendChild(img); row.appendChild(av); row.appendChild(b); messagesEl.appendChild(row); scrollBottom();
+  }
+
+  async function sendImageChat(text, imgBase64, imgMimeType, imgDataUrl) {
+    if (chatBusy) return; chatBusy = true; sendBtn.disabled = true;
+    addUserImageBubble(imgDataUrl, text);
+    showTyping();
+    try {
+      const r = await fetch('/api/imagine', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageBase64: imgBase64, mimeType: imgMimeType, prompt: text || 'Renovera detta rum' })
+      });
+      const data = await r.json();
+      removeTyping();
+      if (data.imageBase64) {
+        addBotImageBubble(data.imageBase64, data.mimeType);
+        const ctxMsg = `Kunden laddade upp en bild av sitt rum med renoveringsbegäran: "${text || 'renovera rummet'}". Du har genererat en visualisering. Kommentera kort resultatet och fråga vad de tycker.`;
+        chatHistory.push({ role: 'user', content: ctxMsg });
+        const bot = await fetchChat(chatHistory);
+        if (bot) chatHistory.push({ role: 'assistant', content: bot });
+      } else {
+        const b = newBotBubble(); b.textContent = 'Kunde inte generera bilden, försök igen.';
+      }
+    } catch {
+      removeTyping();
+      const b = newBotBubble(); b.textContent = 'Bildgenerering misslyckades.';
+    }
+    chatBusy = false; sendBtn.disabled = !chatInput.value.trim();
+  }
+
   sendBtn.addEventListener('click', () => {
-    const t = chatInput.value.trim(); if (!t) return;
-    chatInput.value = ''; sendBtn.disabled = true; addUserBubble(t); sendChat(t);
+    const t = chatInput.value.trim();
+    if (!t && !selectedImage) return;
+    chatInput.value = ''; sendBtn.disabled = true;
+    if (selectedImage) {
+      const img = selectedImage; selectedImage = null;
+      imgPreviewWrap.classList.remove('show'); imgPreviewThumb.src = '';
+      sendImageChat(t, img.base64, img.mimeType, img.dataUrl);
+    } else {
+      addUserBubble(t); sendChat(t);
+    }
   });
   chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); } });
-  chatInput.addEventListener('input', () => { sendBtn.disabled = !chatInput.value.trim() || chatBusy; });
+  chatInput.addEventListener('input', () => { sendBtn.disabled = (!chatInput.value.trim() && !selectedImage) || chatBusy; });
 
   async function initChat() {
     if (chatInited) return; chatInited = true; chatBusy = true;
