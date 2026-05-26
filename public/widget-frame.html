@@ -539,7 +539,7 @@
   let voiceInited = false, noSpeechStop = false;
   let voiceAnalyser = null, vizFrame = null;
 
-  const LABELS = { idle: 'Toca para hablar', listening: 'Lyssnar', thinking: 'Tänker', speaking: 'Talar' };
+  const LABELS = { idle: '', listening: 'Lyssnar', thinking: 'Tänker', speaking: 'Talar' };
 
   // Mic button is the orb body — remap old micBtn references
   const micBtn = {
@@ -634,15 +634,23 @@
   });
 
   function addVLine(text, role) {
-    const el = document.createElement('div');
-    el.className = 't-line ' + role;
-    el.textContent = text;
+    let el;
+    if (role === 'bot') {
+      el = document.createElement('div');
+      el.className = 'row bot';
+      el.innerHTML = '<div class="row-av"><img src="/victoria.jpg" alt="Victoria"></div><div class="bubble"></div>';
+      el.querySelector('.bubble').textContent = text;
+    } else {
+      el = document.createElement('div');
+      el.className = 't-line user';
+      el.textContent = text;
+    }
     transcriptEl.appendChild(el);
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
 
   async function streamToBotLine(messages) {
-    let el = null, full = '';
+    let row = null, bubbleEl = null, full = '';
     try {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -657,8 +665,14 @@
           try {
             const { text } = JSON.parse(pl);
             if (text) {
-              if (!el) { el = document.createElement('div'); el.className = 't-line bot'; transcriptEl.appendChild(el); }
-              full += text; el.textContent = full; transcriptEl.scrollTop = transcriptEl.scrollHeight;
+              if (!row) {
+                row = document.createElement('div');
+                row.className = 'row bot';
+                row.innerHTML = '<div class="row-av"><img src="/victoria.jpg" alt="Victoria"></div><div class="bubble"></div>';
+                bubbleEl = row.querySelector('.bubble');
+                transcriptEl.appendChild(row);
+              }
+              full += text; bubbleEl.textContent = full; transcriptEl.scrollTop = transcriptEl.scrollHeight;
             }
           } catch {}
         }
