@@ -102,6 +102,17 @@ const TOOLS = [
       required: ['full_name', 'phone', 'email', 'project_type', 'budget', 'start_date'],
     },
   },
+  {
+    name: 'request_image',
+    description: 'Call this when seeing a photo of the customer\'s space would genuinely help — e.g. renovation visualization. Only call when contextually relevant to the business and conversation. Provide a short, friendly message explaining what image you need.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Brief friendly message to the customer explaining what image to upload, e.g. "Kan du ladda upp ett foto av ditt kök så jag kan visa hur det skulle se ut renoverat?"' }
+      },
+      required: ['message']
+    }
+  },
 ];
 
 async function submitToGHL(input) {
@@ -261,8 +272,12 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    // If Victoria called submit_lead, execute it then stream her closing message
-    if (toolUse && toolInputJson) {
+    // Handle tool calls
+    if (toolUse?.name === 'request_image' && toolInputJson) {
+      let input = {};
+      try { input = JSON.parse(toolInputJson); } catch {}
+      res.write(`data: ${JSON.stringify({ action: 'request_image', message: input.message || '' })}\n\n`);
+    } else if (toolUse?.name === 'submit_lead' && toolInputJson) {
       let toolResult = 'Lead saved successfully.';
       try {
         const input = JSON.parse(toolInputJson);

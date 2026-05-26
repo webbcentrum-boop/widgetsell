@@ -204,6 +204,7 @@
     wrap.classList.remove('cw-open');
     launcher.setAttribute('aria-expanded', 'false');
     launcher.setAttribute('aria-label', 'Open chat');
+    iframe.contentWindow && iframe.contentWindow.postMessage('cw:stop', '*');
   }
 
   function toggle() { isOpen ? close() : open(); }
