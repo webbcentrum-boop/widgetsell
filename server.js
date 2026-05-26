@@ -306,30 +306,34 @@ app.post('/api/imagine', express.json({ limit: '25mb' }), async (req, res) => {
   if (!imageBase64 || !prompt) return res.status(400).json({ error: 'Missing fields' });
 
   try {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-preview-image-generation:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inlineData: { mimeType: mimeType || 'image/jpeg', data: imageBase64 } },
-              { text: `You are an interior design visualizer. Edit this room image based on the following renovation request. Preserve the room's layout, perspective, and proportions. Apply the changes realistically. Request: ${prompt}` }
-            ]
-          }],
-          generationConfig: { responseModalities: ['IMAGE'] }
-        })
-      }
-    );
+    // Step 1 — Claude analyzes the room and produces a detailed description
+    const analysis = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: imageBase64 } },
+          { type: 'text', text: 'Describe this room for an interior design AI image generator. Include room type, colors, materials, furniture, lighting, style and layout. Be specific. Max 250 words. No intro, just the description.' }
+        ]
+      }]
+    });
 
-    const data = await r.json();
-    const imgPart = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-    if (!imgPart) {
-      console.error('Gemini imagine error:', JSON.stringify(data));
-      return res.status(500).json({ error: 'No image returned' });
+    const roomDesc = analysis.content[0].text.trim();
+    const imagePrompt = `${roomDesc}. Apply these renovations: ${prompt}. Photorealistic interior design, professional photography, high quality, 4k.`;
+
+    // Step 2 — Pollinations.ai generates the image for free using FLUX
+    const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt)}?width=768&height=512&nologo=true&seed=${Math.floor(Math.random() * 999999)}&model=flux`;
+    const imgRes = await fetch(pollinationsUrl, { signal: AbortSignal.timeout(55000) });
+
+    if (!imgRes.ok) {
+      console.error('Pollinations error:', imgRes.status);
+      return res.status(500).json({ error: 'Image generation failed' });
     }
-    res.json({ imageBase64: imgPart.inlineData.data, mimeType: imgPart.inlineData.mimeType });
+
+    const imgBuffer = await imgRes.arrayBuffer();
+    const imgBase64Out = Buffer.from(imgBuffer).toString('base64');
+    res.json({ imageBase64: imgBase64Out, mimeType: 'image/jpeg' });
   } catch (e) {
     console.error('Imagine error:', e.message);
     res.status(500).json({ error: 'Image generation failed' });
