@@ -6,7 +6,7 @@
   <title>WidgetSell</title>
   <style>
     :root {
-      --w-accent:     var(--w-accent);
+      --w-accent:     #16a34a;
       --w-accent-rgb: 22, 163, 74;
       --w-accent-dk:  color-mix(in srgb, var(--w-accent) 80%, black);
       --w-accent-br:  color-mix(in srgb, var(--w-accent) 60%, white);
@@ -946,8 +946,10 @@
 
   function stopAll() {
     if (vState === 'listening') stopRecording();
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (activeAudio) { activeAudio.pause(); activeAudio = null; }
     if (vState !== 'idle') setVState('idle');
+    voiceInited = false;
   }
 
   async function initVoice() {
