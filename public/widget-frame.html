@@ -549,9 +549,12 @@
 </div>
 <script>
   // ── Site data from host page ───────────────────────────────
-  let siteData = null;
+  let siteData = null, widgetConfig = {};
   window.addEventListener('message', function (e) {
-    if (e.data && e.data.type === 'cw:sitedata') siteData = e.data.data;
+    if (e.data && e.data.type === 'cw:sitedata') {
+      siteData = e.data.data;
+      if (e.data.config) widgetConfig = e.data.config;
+    }
     if (e.data === 'cw:stop') { stopAll(); stopViz(); hideImageRequest(); }
   });
 
@@ -737,7 +740,7 @@
     try {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, siteData, mode: 'voice' }),
+        body: JSON.stringify({ messages, siteData, mode: 'voice', config: widgetConfig }),
       });
       const reader = res.body.getReader(), dec = new TextDecoder();
       while (true) {
@@ -986,7 +989,7 @@
     showTyping();
     let bubble = null, fullText = '';
     try {
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages, siteData, mode: 'chat' }) });
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages, siteData, mode: 'chat', config: widgetConfig }) });
       const reader = res.body.getReader(), dec = new TextDecoder();
       while (true) {
         const { done, value } = await reader.read(); if (done) break;

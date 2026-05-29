@@ -8,8 +8,13 @@
     const scripts = d.getElementsByTagName('script');
     return scripts[scripts.length - 1];
   }());
-  const BASE = (w.WidgetSellConfig && w.WidgetSellConfig.baseUrl)
-    || scriptEl.src.replace(/\/[^/]+$/, '');
+  const _cfg = w.WidgetSellConfig || {};
+  const BASE = _cfg.baseUrl || scriptEl.src.replace(/\/[^/]+$/, '');
+  const widgetConfig = {
+    webhookUrl: _cfg.webhookUrl || null,
+    bookingUrl: _cfg.bookingUrl || null,
+    agentName:  _cfg.agentName  || null,
+  };
 
   // ── Scan host website ─────────────────────────────────────────────────────
   const pageScan = (function () {
@@ -170,7 +175,7 @@
   // Send site scan data to iframe once it has loaded
   iframe.addEventListener('load', function () {
     if (pageScan) {
-      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan }, '*');
+      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig }, '*');
     }
   });
 
@@ -194,7 +199,7 @@
     badge.classList.remove('cw-show');
     iframe.contentWindow && iframe.contentWindow.postMessage('cw:open', '*');
     if (pageScan && iframe.contentWindow) {
-      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan }, '*');
+      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig }, '*');
     }
   }
 

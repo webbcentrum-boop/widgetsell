@@ -56,14 +56,17 @@ You represent this business exclusively. If a visitor asks about anything unrela
 - You represent this specific business. Every response should reflect their brand, services, and values.
 - Never use emojis. Keep the tone premium and professional — emojis cheapen the experience.`;
 
-function buildSystemPrompt(siteData, mode) {
+function buildSystemPrompt(siteData, mode, config) {
   const voiceNote = mode === 'voice'
     ? '\n\n## Voice mode\nYour response will be spoken aloud by a text-to-speech engine. Keep every answer to 1–2 short sentences maximum. Use zero special characters, no dashes, no parentheses, no markdown. Write exactly as you would speak naturally. Sound completely human when read aloud.'
     : '';
 
-  if (!siteData) return BASE_SYSTEM_PROMPT + voiceNote;
+  const agentName = config?.agentName || 'Victoria';
+  let prompt = BASE_SYSTEM_PROMPT.replace(/Victoria/g, agentName) + voiceNote;
 
-  const parts = [BASE_SYSTEM_PROMPT + voiceNote];
+  if (!siteData) return prompt;
+
+  const parts = [prompt];
   parts.push('\n\n## Website context');
   parts.push('You are installed on the following business website. Read this carefully — it defines who you are working for, what they offer, and what a successful conversation looks like for them:\n');
 
@@ -73,6 +76,7 @@ function buildSystemPrompt(siteData, mode) {
   if (siteData.h1s)         parts.push(`Main headlines: ${siteData.h1s}`);
   if (siteData.h2s)         parts.push(`Services / sections: ${siteData.h2s}`);
   if (siteData.bodyText)    parts.push(`\nFull website content:\n${siteData.bodyText}`);
+  if (config?.bookingUrl)   parts.push(`\nBooking link: ${config.bookingUrl} — use this when guiding visitors to book.`);
 
   parts.push(`
 ## How to use this context
@@ -80,7 +84,7 @@ function buildSystemPrompt(siteData, mode) {
 2. Know what the natural next step is for a visitor (booking, quote, consultation, purchase, etc.).
 3. Answer any questions about the business's services, process, or offering based on the website content above.
 4. Make every response specific and relevant to this business — never give generic answers.
-5. Introduce yourself as Victoria and make clear you're here to help with anything related to this business.`);
+5. Introduce yourself as ${agentName} and make clear you're here to help with anything related to this business.`);
 
   return parts.join('\n');
 }
@@ -226,9 +230,21 @@ app.get('/widget-frame', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'widget-frame.html'));
 });
 
+async function submitLead(input, config) {
+  if (config?.webhookUrl) {
+    await fetch(config.webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...input, source: 'WidgetSell' }),
+    });
+    return;
+  }
+  await submitToGHL(input);
+}
+
 app.post('/api/chat', async (req, res) => {
-  const { messages, siteData, mode } = req.body;
-  const systemPrompt = buildSystemPrompt(siteData, mode);
+  const { messages, siteData, mode, config } = req.body;
+  const systemPrompt = buildSystemPrompt(siteData, mode, config);
   const maxTokens = mode === 'voice' ? 300 : 800;
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -281,8 +297,8 @@ app.post('/api/chat', async (req, res) => {
       let toolResult = 'Lead saved successfully.';
       try {
         const input = JSON.parse(toolInputJson);
-        await submitToGHL(input);
-        console.log(`✓  GHL lead: ${input.full_name} ${input.phone}`);
+        await submitLead(input, config);
+        console.log(`✓  Lead: ${input.full_name} ${input.phone}`);
       } catch (e) {
         console.error('GHL error:', e.message);
         toolResult = 'Lead processed.';
