@@ -16,6 +16,35 @@
     agentName:  _cfg.agentName  || null,
   };
 
+  // ── Extract page theme ─────────────────────────────────────
+  const pageTheme = (function () {
+    try {
+      const rootCSS = w.getComputedStyle(d.documentElement);
+      const varNames = ['--primary','--primary-color','--accent','--accent-color',
+                        '--brand','--brand-color','--color-primary','--theme-color',
+                        '--main-color','--highlight','--link-color'];
+      for (const v of varNames) {
+        const val = rootCSS.getPropertyValue(v).trim();
+        if (val && /^#|^rgb|^hsl/.test(val)) return { accent: val };
+      }
+      const btn = d.querySelector([
+        'button[class*="primary"]','button[class*="cta"]','.btn-primary',
+        '.button--primary','.button-primary','[class*="hero"] a[class*="btn"]'
+      ].join(','));
+      if (btn) {
+        const bg = w.getComputedStyle(btn).backgroundColor;
+        if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') return { accent: bg };
+      }
+      const link = d.querySelector('nav a, header a');
+      if (link) {
+        const c = w.getComputedStyle(link).color;
+        if (c && c !== 'rgb(0, 0, 0)' && c !== 'rgb(255, 255, 255)') return { accent: c };
+      }
+      const font = w.getComputedStyle(d.body).fontFamily;
+      return { accent: null, font };
+    } catch { return null; }
+  }());
+
   // ── Scan host website ─────────────────────────────────────────────────────
   const pageScan = (function () {
     try {
@@ -43,8 +72,8 @@
       height: 50px;
       padding: 0 20px 0 16px;
       border-radius: 25px;
-      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-      box-shadow: 0 4px 24px rgba(16,185,129,.5), 0 1px 6px rgba(0,0,0,.25), 0 0 0 1px rgba(16,185,129,.2);
+      background: var(--ws-accent-grad, linear-gradient(135deg, #10b981 0%, #059669 100%));
+      box-shadow: var(--ws-accent-shadow, 0 4px 24px rgba(16,185,129,.5), 0 1px 6px rgba(0,0,0,.25), 0 0 0 1px rgba(16,185,129,.2));
       cursor: pointer;
       border: none;
       display: flex;
@@ -142,6 +171,23 @@
   `;
   d.head.appendChild(css);
 
+  // ── Apply host brand color to launcher ────────────────────────────────────
+  if (pageTheme?.accent) {
+    try {
+      const canvas = d.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = pageTheme.accent;
+      ctx.fillRect(0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      if (r || g || b) {
+        const root = d.documentElement.style;
+        root.setProperty('--ws-accent-grad', `linear-gradient(135deg, rgb(${r},${g},${b}) 0%, rgb(${Math.max(0,r-30)},${Math.max(0,g-30)},${Math.max(0,b-30)}) 100%)`);
+        root.setProperty('--ws-accent-shadow', `0 4px 24px rgba(${r},${g},${b},.45), 0 1px 6px rgba(0,0,0,.25), 0 0 0 1px rgba(${r},${g},${b},.2)`);
+      }
+    } catch {}
+  }
+
   // ── Launcher button ────────────────────────────────────────────────────────
   const launcher = d.createElement('button');
   launcher.id = 'cw-launcher';
@@ -175,7 +221,7 @@
   // Send site scan data to iframe once it has loaded
   iframe.addEventListener('load', function () {
     if (pageScan) {
-      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig }, '*');
+      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig, theme: pageTheme }, '*');
     }
   });
 
@@ -199,7 +245,7 @@
     badge.classList.remove('cw-show');
     iframe.contentWindow && iframe.contentWindow.postMessage('cw:open', '*');
     if (pageScan && iframe.contentWindow) {
-      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig }, '*');
+      iframe.contentWindow.postMessage({ type: 'cw:sitedata', data: pageScan, config: widgetConfig, theme: pageTheme }, '*');
     }
   }
 
