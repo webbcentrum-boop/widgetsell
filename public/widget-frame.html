@@ -432,7 +432,7 @@
   <!-- ── Mode selection screen ── -->
   <div id="screen-mode" class="screen active">
     <div class="header">
-      <span class="brand">Widget<span>Sell</span></span>
+      <span class="brand" id="brand-mode">Widget<span>Sell</span></span>
       <button class="icon-btn" id="closeMode">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
       </button>
@@ -441,7 +441,7 @@
       <div class="mode-greeting">
         <div class="mode-av"><img src="/victoria.jpg" alt="Victoria"></div>
         <h2>Hej! Jag är Victoria</h2>
-        <p>AI säljare på WidgetSell.<br>Hur vill du prata med mig?</p>
+        <p>AI säljare på <span id="greeting-company">WidgetSell</span>.<br>Hur vill du prata med mig?</p>
       </div>
       <div class="mode-cards">
         <button class="mode-card" id="pickChat">
@@ -471,7 +471,7 @@
   <!-- ── Voice screen ── -->
   <div id="screen-voice" class="screen">
     <div class="header">
-      <span class="brand">Widget<span>Sell</span></span>
+      <span class="brand" id="brand-voice">Widget<span>Sell</span></span>
       <button class="icon-btn" id="closeVoice">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
       </button>
@@ -581,11 +581,22 @@
     } catch {}
   }
 
+  function applyCompanyName(data) {
+    if (!data?.title) return;
+    const name = data.title.split(/\s*[\|\-–—•·]\s*/)[0].trim() || data.title.trim();
+    if (!name) return;
+    const set = (id) => { const el = document.getElementById(id); if (el) el.innerHTML = `<span>${name}</span>`; };
+    set('brand-mode');
+    set('brand-voice');
+    const g = document.getElementById('greeting-company'); if (g) g.textContent = name;
+  }
+
   window.addEventListener('message', function (e) {
     if (e.data && e.data.type === 'cw:sitedata') {
       siteData = e.data.data;
       if (e.data.config) widgetConfig = e.data.config;
       if (e.data.theme) applyTheme(e.data.theme);
+      if (e.data.data) applyCompanyName(e.data.data);
     }
     if (e.data === 'cw:stop') { stopAll(); stopViz(); hideImageRequest(); }
   });
@@ -767,16 +778,22 @@
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
 
+  let voiceAbort = null;
+
   async function streamToBotLine(messages) {
+    if (voiceAbort) voiceAbort.abort();
+    voiceAbort = new AbortController();
     let row = null, bubbleEl = null, full = '';
     try {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages, siteData, mode: 'voice', config: widgetConfig }),
+        signal: voiceAbort.signal,
       });
       const reader = res.body.getReader(), dec = new TextDecoder();
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
+        if (!voiceInited) { reader.cancel(); return ''; }
         for (const line of dec.decode(value, { stream: true }).split('\n')) {
           if (!line.startsWith('data: ')) continue;
           const pl = line.slice(6); if (pl === '[DONE]') break;
@@ -930,38 +947,42 @@
     setVState('thinking');
     const wavBlob = float32ToWav(samples);
     const transcript = await transcribe(wavBlob);
+    if (!voiceInited) return;
     if (!transcript) { setVState('idle'); return; }
     addVLine(transcript, 'user');
     vHistory.push({ role: 'user', content: transcript });
     const reply = await streamToBotLine(vHistory);
+    if (!voiceInited) return;
     if (reply) {
       vHistory.push({ role: 'assistant', content: reply });
       setVState('speaking');
       await speak(reply);
-      startRecording(true);
+      if (voiceInited) startRecording(true);
     } else {
       setVState('idle');
     }
   }
 
   function stopAll() {
+    voiceInited = false;
+    if (voiceAbort) { voiceAbort.abort(); voiceAbort = null; }
     if (vState === 'listening') stopRecording();
     if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     if (activeAudio) { activeAudio.pause(); activeAudio = null; }
     if (vState !== 'idle') setVState('idle');
-    voiceInited = false;
   }
 
   async function initVoice() {
     if (voiceInited) return; voiceInited = true;
     startViz();
     const reply = await streamToBotLine([{ role: 'user', content: 'hej' }]);
+    if (!voiceInited) return;
     if (reply) {
       vHistory.push({ role: 'user', content: 'hej' });
       vHistory.push({ role: 'assistant', content: reply });
       setVState('speaking');
       await speak(reply);
-      startRecording(true);
+      if (voiceInited) startRecording(true);
     } else {
       setVState('idle');
     }
@@ -971,19 +992,19 @@
     if (voiceInited) { setVState('idle'); startViz(); return; }
     voiceInited = true;
     startViz();
-    // Reuse chat history if conversation already started
     if (chatHistory.length >= 2) {
       vHistory = [...chatHistory];
       setVState('idle');
       return;
     }
     const reply = await streamToBotLine([{ role: 'user', content: 'hej' }]);
+    if (!voiceInited) return;
     if (reply) {
       vHistory.push({ role: 'user', content: 'hej' });
       vHistory.push({ role: 'assistant', content: reply });
       setVState('speaking');
       await speak(reply);
-      startRecording(true);
+      if (voiceInited) startRecording(true);
     } else {
       setVState('idle');
     }
