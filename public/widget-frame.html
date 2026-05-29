@@ -1113,9 +1113,11 @@
       if (chatBusy) return; chatBusy = true; sendBtn.disabled = true;
       addUserImageBubble(img.dataUrl, text); showTyping();
       try {
-        const r = await fetch('/api/imagine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: img.base64, mimeType: img.mimeType, prompt: text || 'Renovera detta rum' }) });
+        const r = await fetch('/api/imagine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: img.base64, mimeType: img.mimeType, prompt: text || 'Renovera detta rum', siteData, config: widgetConfig }) });
         const data = await r.json(); removeTyping();
-        if (data.imageBase64) {
+        if (data.irrelevant) {
+          newBotBubble().textContent = data.message;
+        } else if (data.imageBase64) {
           addBotImageBubble(data.imageBase64, data.mimeType);
           chatHistory.push({ role: 'user', content: `Kunden laddade upp en bild med begäran: "${text || 'renovera rummet'}". Visualisering genererad. Kommentera kort.` });
           const bot = await fetchChat(chatHistory);
@@ -1126,9 +1128,11 @@
     } else {
       addVLine(text || 'Här är min bild', 'user'); stopAll(); setVState('thinking');
       try {
-        const r = await fetch('/api/imagine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: img.base64, mimeType: img.mimeType, prompt: text || 'Renovera detta rum' }) });
+        const r = await fetch('/api/imagine', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ imageBase64: img.base64, mimeType: img.mimeType, prompt: text || 'Renovera detta rum', siteData, config: widgetConfig }) });
         const data = await r.json();
-        if (data.imageBase64) {
+        if (data.irrelevant) {
+          addVLine(data.message, 'bot'); setVState('idle');
+        } else if (data.imageBase64) {
           const row = document.createElement('div'); row.className = 'row bot';
           const av = document.createElement('div'); av.className = 'row-av'; av.innerHTML = '<img src="/victoria.jpg" alt="Victoria">';
           const b = document.createElement('div'); b.className = 'bubble';

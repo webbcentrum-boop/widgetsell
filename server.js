@@ -333,10 +333,40 @@ app.post('/api/chat', async (req, res) => {
 });
 
 app.post('/api/imagine', express.json({ limit: '25mb' }), async (req, res) => {
-  const { imageBase64, mimeType, prompt } = req.body;
+  const { imageBase64, mimeType, prompt, siteData, config } = req.body;
   if (!imageBase64 || !prompt) return res.status(400).json({ error: 'Missing fields' });
 
   try {
+    // Step 0 — Relevance check
+    const businessContext = siteData
+      ? [siteData.title, siteData.description, siteData.h1s, siteData.h2s].filter(Boolean).join(' — ')
+      : '';
+
+    if (businessContext) {
+      const check = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 120,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mimeType || 'image/jpeg', data: imageBase64 } },
+            { type: 'text', text: `Business: "${businessContext}". User request: "${prompt}". Is this image relevant to what this business offers and what the user is asking for? Reply with JSON only: {"relevant": true or false, "expectedTopic": "in Swedish: what kind of image they should upload instead"}` }
+          ]
+        }]
+      });
+
+      try {
+        const match = check.content[0].text.match(/\{[\s\S]*\}/);
+        const result = JSON.parse(match?.[0] || '{}');
+        if (result.relevant === false) {
+          return res.json({
+            irrelevant: true,
+            message: `Ladda gärna upp en bild på ${result.expectedTopic || 'det vi kan hjälpa dig med'}.`
+          });
+        }
+      } catch {}
+    }
+
     // Step 1 — Claude analyzes the room and produces a detailed description
     const analysis = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
