@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
 import { supabase } from './lib/supabase.js';
 import { sendEmailReminder, sendSMSReminder } from './lib/reminders.js';
+import cron from 'node-cron';
 
 // ── Lead capture helpers ───────────────────────────────────────────────────
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
@@ -547,4 +548,49 @@ app.listen(PORT, () => {
   console.log(`\n✓  WidgetSell → http://localhost:${PORT}\n`);
   if (!process.env.ANTHROPIC_API_KEY) console.warn('⚠  ANTHROPIC_API_KEY not set\n');
   if (!process.env.HIGHLEVEL_API_KEY) console.warn('⚠  HIGHLEVEL_API_KEY not set\n');
+  if (!process.env.SUPABASE_URL)      console.warn('⚠  SUPABASE_URL not set — lead recovery disabled\n');
+});
+
+// ── Cron: process abandoned leads every 30 minutes ─────────────────────────
+cron.schedule('*/30 * * * *', async () => {
+  if (!supabase) return;
+  console.log('⏱  Cron: checking abandoned leads…');
+
+  const { data: leads = [] } = await supabase
+    .from('abandoned_leads')
+    .select('*')
+    .eq('status', 'started')
+    .eq('unsubscribed', false);
+
+  const now = Date.now();
+  let processed = 0;
+
+  for (const lead of leads) {
+    const ageMin = (now - new Date(lead.created_at).getTime()) / 60000;
+    const updates = {};
+
+    if (ageMin >= 60   && !lead.reminder_1h_sent_at)  {
+      await sendEmailReminder(lead, '1h');
+      await sendSMSReminder(lead, '1h');
+      updates.reminder_1h_sent_at = new Date().toISOString();
+    }
+    if (ageMin >= 1440 && !lead.reminder_24h_sent_at) {
+      await sendEmailReminder(lead, '24h');
+      await sendSMSReminder(lead, '24h');
+      updates.reminder_24h_sent_at = new Date().toISOString();
+    }
+    if (ageMin >= 4320 && !lead.reminder_3d_sent_at)  {
+      await sendEmailReminder(lead, '3d');
+      await sendSMSReminder(lead, '3d');
+      updates.reminder_3d_sent_at = new Date().toISOString();
+      updates.status = 'abandoned';
+    }
+
+    if (Object.keys(updates).length) {
+      await supabase.from('abandoned_leads').update(updates).eq('session_id', lead.session_id);
+      processed++;
+    }
+  }
+
+  if (processed) console.log(`✓  Cron: sent reminders to ${processed} lead(s)`);
 });
