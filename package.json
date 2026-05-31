@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.55.0",
+    "@supabase/supabase-js": "^2.106.2",
     "dotenv": "^16.0.0",
     "express": "^4.21.0"
   }

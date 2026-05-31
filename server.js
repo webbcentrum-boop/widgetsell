@@ -4,6 +4,29 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
+import { supabase } from './lib/supabase.js';
+import { sendEmailReminder, sendSMSReminder } from './lib/reminders.js';
+
+// ── Lead capture helpers ───────────────────────────────────────────────────
+const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+const PHONE_RE = /(?:\+?\d[\d\s\-().]{5,}\d)/;
+
+function extractContact(messages) {
+  let email = null, phone = null;
+  for (const m of messages) {
+    if (m.role !== 'user' || typeof m.content !== 'string') continue;
+    if (!email) { const e = m.content.match(EMAIL_RE); if (e) email = e[0]; }
+    if (!phone) { const p = m.content.match(PHONE_RE); if (p) phone = p[0].trim(); }
+  }
+  return { email, phone };
+}
+
+async function upsertLead(sessionId, fields) {
+  if (!supabase || !sessionId) return;
+  const { error } = await supabase.from('abandoned_leads')
+    .upsert({ session_id: sessionId, ...fields }, { onConflict: 'session_id' });
+  if (error) console.error('Lead upsert:', error.message);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -243,8 +266,25 @@ async function submitLead(input, config) {
 }
 
 app.post('/api/chat', async (req, res) => {
-  const { messages, siteData, mode, config } = req.body;
+  const { messages, siteData, mode, config, sessionId } = req.body;
   const systemPrompt = buildSystemPrompt(siteData, mode, config);
+
+  // ── Partial lead capture ─────────────────────────────────────────────────
+  if (sessionId && messages?.length) {
+    const { email, phone } = extractContact(messages);
+    if (email || phone) {
+      const businessName = siteData?.title
+        ? siteData.title.split(/\s*[\|\-–—•·]\s*/)[0].trim()
+        : null;
+      await upsertLead(sessionId, {
+        ...(email        && { email }),
+        ...(phone        && { phone }),
+        ...(businessName && { business_name: businessName }),
+        ...(siteData?.url && { business_url: siteData.url }),
+        status: 'started',
+      });
+    }
+  }
   const maxTokens = mode === 'voice' ? 80 : 800;
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -299,6 +339,9 @@ app.post('/api/chat', async (req, res) => {
         const input = JSON.parse(toolInputJson);
         await submitLead(input, config);
         console.log(`✓  Lead: ${input.full_name} ${input.phone}`);
+        if (sessionId) await upsertLead(sessionId, {
+          name: input.full_name, email: input.email, phone: input.phone, status: 'completed',
+        });
       } catch (e) {
         console.error('GHL error:', e.message);
         toolResult = 'Lead processed.';
@@ -399,6 +442,104 @@ app.post('/api/imagine', express.json({ limit: '25mb' }), async (req, res) => {
     console.error('Imagine error:', e.message);
     res.status(500).json({ error: 'Image generation failed' });
   }
+});
+
+// ── Cron: process abandoned leads ─────────────────────────────────────────
+// Call this on a schedule (e.g. every 30 min) from Render/Railway cron or an external cron service.
+// Protect with CRON_SECRET env var.
+app.get('/api/cron/process-abandoned', async (req, res) => {
+  if (process.env.CRON_SECRET && req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabase) return res.json({ skipped: true, reason: 'Supabase not configured' });
+
+  const { data: leads = [] } = await supabase
+    .from('abandoned_leads')
+    .select('*')
+    .eq('status', 'started')
+    .eq('unsubscribed', false);
+
+  const now = Date.now();
+  let processed = 0;
+
+  for (const lead of leads) {
+    const ageMin = (now - new Date(lead.created_at).getTime()) / 60000;
+    const updates = {};
+
+    if (ageMin >= 60   && !lead.reminder_1h_sent_at)  {
+      await sendEmailReminder(lead, '1h');
+      await sendSMSReminder(lead, '1h');
+      updates.reminder_1h_sent_at = new Date().toISOString();
+    }
+    if (ageMin >= 1440 && !lead.reminder_24h_sent_at) {
+      await sendEmailReminder(lead, '24h');
+      await sendSMSReminder(lead, '24h');
+      updates.reminder_24h_sent_at = new Date().toISOString();
+    }
+    if (ageMin >= 4320 && !lead.reminder_3d_sent_at)  {
+      await sendEmailReminder(lead, '3d');
+      await sendSMSReminder(lead, '3d');
+      updates.reminder_3d_sent_at = new Date().toISOString();
+      updates.status = 'abandoned';
+    }
+
+    if (Object.keys(updates).length) {
+      await supabase.from('abandoned_leads').update(updates).eq('session_id', lead.session_id);
+      processed++;
+    }
+  }
+
+  console.log(`✓ Cron: processed ${processed}/${leads.length} leads`);
+  res.json({ processed, total: leads.length });
+});
+
+// ── Unsubscribe ────────────────────────────────────────────────────────────
+app.get('/api/unsubscribe/:sessionId', async (req, res) => {
+  if (supabase) {
+    await supabase.from('abandoned_leads')
+      .update({ unsubscribed: true })
+      .eq('session_id', req.params.sessionId);
+  }
+  res.send(`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;text-align:center;padding:80px 24px;color:#18181b">
+    <h2 style="font-size:24px;margin-bottom:12px">You've been unsubscribed</h2>
+    <p style="color:#6b7280">You won't receive any more reminders. Have a great day!</p>
+  </body></html>`);
+});
+
+// ── Leads API (for dashboard) ──────────────────────────────────────────────
+app.get('/api/leads', async (req, res) => {
+  if (process.env.DASHBOARD_SECRET && req.headers['x-dashboard-secret'] !== process.env.DASHBOARD_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabase) return res.json({ leads: [], stats: {} });
+
+  const { data: leads = [] } = await supabase
+    .from('abandoned_leads')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  const total     = leads.length;
+  const abandoned = leads.filter(l => l.status === 'abandoned').length;
+  const completed = leads.filter(l => l.status === 'completed' || l.status === 'recovered').length;
+  const recovered = leads.filter(l => l.status === 'recovered').length;
+
+  res.json({ leads, stats: { total, abandoned, completed, recovered, rate: total ? Math.round((recovered / total) * 100) : 0 } });
+});
+
+// ── Mark lead recovered (manual, for dashboard) ────────────────────────────
+app.patch('/api/leads/:sessionId/status', async (req, res) => {
+  if (process.env.DASHBOARD_SECRET && req.headers['x-dashboard-secret'] !== process.env.DASHBOARD_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { status } = req.body;
+  if (!['started','abandoned','completed','recovered'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  if (supabase) {
+    await supabase.from('abandoned_leads').update({ status }).eq('session_id', req.params.sessionId);
+  }
+  res.json({ ok: true });
 });
 
 const PORT = process.env.PORT || 3000;

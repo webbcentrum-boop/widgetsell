@@ -272,6 +272,12 @@
     if (e.data === 'cw:close') close();
   });
 
+  // ── Auto-open on recovery link (?widgetsell_recover=SESSION_ID) ───────────
+  const recoverParam = new URLSearchParams(w.location.search).get('widgetsell_recover');
+  if (recoverParam) {
+    setTimeout(function () { open(); }, 600);
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
   w.WidgetSell = { open: open, close: close, toggle: toggle };
 

@@ -561,6 +561,11 @@
 
 </div>
 <script>
+  // ── Session ID (stable per widget open) ───────────────────
+  const SESSION_ID = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36);
+
   // ── Site data from host page ───────────────────────────────
   let siteData = null, widgetConfig = {};
 
@@ -622,7 +627,7 @@
     try {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, siteData, mode }),
+        body: JSON.stringify({ messages, siteData, mode, sessionId: SESSION_ID }),
       });
       const reader = res.body.getReader(), dec = new TextDecoder();
       let full = '';
@@ -825,7 +830,7 @@
       try {
         const res = await fetch('/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages, siteData, mode: 'voice', config: widgetConfig }),
+          body: JSON.stringify({ messages, siteData, mode: 'voice', config: widgetConfig, sessionId: SESSION_ID }),
           signal: myAbort.signal,
         });
         const reader = res.body.getReader(), dec = new TextDecoder();
@@ -1115,7 +1120,7 @@
     showTyping();
     let bubble = null, fullText = '';
     try {
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages, siteData, mode: 'chat', config: widgetConfig }) });
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages, siteData, mode: 'chat', config: widgetConfig, sessionId: SESSION_ID }) });
       const reader = res.body.getReader(), dec = new TextDecoder();
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
