@@ -58,7 +58,7 @@ You represent this business exclusively. If a visitor asks about anything unrela
 
 function buildSystemPrompt(siteData, mode, config) {
   const voiceNote = mode === 'voice'
-    ? '\n\n## Voice mode\nYou are in a live voice conversation. Respond in 1 sentence only — 2 sentences absolute maximum. No filler openers ("Of course!", "Great!", "Sure!") — respond directly and naturally. No special characters, dashes, parentheses, lists, or markdown. Write exactly as you speak in real life. Match the visitor\'s language immediately.'
+    ? '\n\n## Voice mode\nThis is a live spoken conversation. Your response will be read aloud. Rules — break any of these and the experience fails:\n- Max 1 sentence. Never 2. Never more.\n- Under 20 words total.\n- No filler ("Of course!", "Great!", "Sure!", "Absolutely!") — start with the actual answer.\n- No punctuation beyond a period at the end. No dashes, commas, parentheses, or colons.\n- Sound like a real person talking, not writing.\n- Match the visitor\'s language instantly.'
     : '';
 
   const agentName = config?.agentName || 'Victoria';
@@ -211,9 +211,9 @@ app.post('/api/tts', async (req, res) => {
       },
       body: JSON.stringify({
         text,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: { stability: 0.42, similarity_boost: 0.82, style: 0.38, use_speaker_boost: true },
-        speed: 1.0,
+        model_id: 'eleven_flash_v2_5',
+        voice_settings: { stability: 0.45, similarity_boost: 0.80, style: 0.30, use_speaker_boost: true },
+        speed: 1.1,
       }),
     });
 
@@ -245,7 +245,7 @@ async function submitLead(input, config) {
 app.post('/api/chat', async (req, res) => {
   const { messages, siteData, mode, config } = req.body;
   const systemPrompt = buildSystemPrompt(siteData, mode, config);
-  const maxTokens = mode === 'voice' ? 300 : 800;
+  const maxTokens = mode === 'voice' ? 80 : 800;
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -306,7 +306,7 @@ app.post('/api/chat', async (req, res) => {
 
       const stream2 = client.messages.stream({
         model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
-        max_tokens: mode === 'voice' ? 200 : 400,
+        max_tokens: mode === 'voice' ? 80 : 400,
         system: systemPrompt,
         messages: [
           ...messages,
