@@ -200,7 +200,7 @@
     <span class="cw-icon cw-icon-close" aria-hidden="true">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </span>
-    <span class="cw-label">Chatta med oss</span>
+    <span class="cw-label">Chat with us</span>
     <span id="cw-badge" aria-hidden="true">1</span>
   `;
   d.body.appendChild(launcher);

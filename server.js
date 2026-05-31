@@ -58,7 +58,7 @@ You represent this business exclusively. If a visitor asks about anything unrela
 
 function buildSystemPrompt(siteData, mode, config) {
   const voiceNote = mode === 'voice'
-    ? '\n\n## Voice mode\nYour response will be spoken aloud by a text-to-speech engine. Keep every answer to 1–2 short sentences maximum. Use zero special characters, no dashes, no parentheses, no markdown. Write exactly as you would speak naturally. Sound completely human when read aloud.'
+    ? '\n\n## Voice mode\nYou are in a live voice conversation. Respond in 1 sentence only — 2 sentences absolute maximum. No filler openers ("Of course!", "Great!", "Sure!") — respond directly and naturally. No special characters, dashes, parentheses, lists, or markdown. Write exactly as you speak in real life. Match the visitor\'s language immediately.'
     : '';
 
   const agentName = config?.agentName || 'Victoria';
@@ -211,9 +211,9 @@ app.post('/api/tts', async (req, res) => {
       },
       body: JSON.stringify({
         text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: { stability: 0.18, similarity_boost: 0.90, style: 0.90, use_speaker_boost: true },
-        speed: 0.78,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: { stability: 0.42, similarity_boost: 0.82, style: 0.38, use_speaker_boost: true },
+        speed: 1.0,
       }),
     });
 
@@ -253,7 +253,7 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     const stream = client.messages.stream({
-      model: 'claude-opus-4-7',
+      model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
       max_tokens: maxTokens,
       system: systemPrompt,
       messages,
@@ -305,7 +305,7 @@ app.post('/api/chat', async (req, res) => {
       }
 
       const stream2 = client.messages.stream({
-        model: 'claude-opus-4-7',
+        model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
         max_tokens: mode === 'voice' ? 200 : 400,
         system: systemPrompt,
         messages: [
