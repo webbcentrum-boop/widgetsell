@@ -518,13 +518,14 @@ app.get('/api/cron/process-abandoned', async (req, res) => {
 app.get('/api/fortnox/auth', (req, res) => {
   if (!process.env.FORTNOX_CLIENT_ID) return res.status(500).send('FORTNOX_CLIENT_ID saknas i .env');
   const redirectUri = `${process.env.WIDGET_BASE_URL}/api/fortnox/callback`;
-  const url = `https://apps.fortnox.se/oauth-v1/auth?client_id=${process.env.FORTNOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=invoice+article+customer&response_type=code&access_type=offline`;
+  const url = `https://apps.fortnox.se/oauth-v1/auth?client_id=${process.env.FORTNOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=invoice+customer+article&response_type=code&access_type=offline`;
+  if (req.query.debug) return res.send(`<pre>${url}</pre><br><a href="${url}">Klicka här</a>`);
   res.redirect(url);
 });
 
 app.get('/api/fortnox/callback', async (req, res) => {
   const { code } = req.query;
-  if (!code) return res.status(400).send('Ingen kod från Fortnox');
+  if (!code) return res.status(400).send(`Ingen kod från Fortnox. Fortnox skickade: <pre>${JSON.stringify(req.query, null, 2)}</pre>`);
 
   const redirectUri = `${process.env.WIDGET_BASE_URL}/api/fortnox/callback`;
   const creds = Buffer.from(`${process.env.FORTNOX_CLIENT_ID}:${process.env.FORTNOX_CLIENT_SECRET}`).toString('base64');
@@ -614,6 +615,21 @@ app.post('/api/booking-confirmed', async (req, res) => {
     .insert({ client_token: client, month_year: monthYear });
 
   if (insertError) return res.status(500).json({ error: insertError.message });
+
+  // Skicka till Lovable admin
+  if (process.env.LOVABLE_WEBHOOK_URL) {
+    fetch(process.env.LOVABLE_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name:       clientData.client_name,
+        client_email:      clientData.email,
+        client_token:      client,
+        booked_at:         new Date().toISOString(),
+        price_per_meeting: 890,
+      }),
+    }).catch(e => console.error('Lovable webhook error:', e.message));
+  }
 
   console.log(`✓ Bokning registrerad: ${clientData.client_name} (${monthYear})`);
   res.json({ ok: true });
