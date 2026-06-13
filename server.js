@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { Readable } from 'stream';
 import { supabase } from './lib/supabase.js';
 import { sendEmailReminder, sendSMSReminder } from './lib/reminders.js';
+import { ensureCustomer, createAndSendInvoice } from './lib/fortnox.js';
 import cron from 'node-cron';
 
 // ── Lead capture helpers ───────────────────────────────────────────────────
@@ -512,6 +513,173 @@ app.get('/api/cron/process-abandoned', async (req, res) => {
   res.json({ processed, total: leads.length });
 });
 
+// ── Fortnox OAuth2: engångssetup ───────────────────────────────────────────
+// Besök /api/fortnox/auth i webbläsaren för att koppla Fortnox-kontot.
+app.get('/api/fortnox/auth', (req, res) => {
+  if (!process.env.FORTNOX_CLIENT_ID) return res.status(500).send('FORTNOX_CLIENT_ID saknas i .env');
+  const redirectUri = `${process.env.WIDGET_BASE_URL}/api/fortnox/callback`;
+  const url = `https://apps.fortnox.se/oauth-v1/auth?client_id=${process.env.FORTNOX_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=invoice+article+customer&response_type=code&access_type=offline`;
+  res.redirect(url);
+});
+
+app.get('/api/fortnox/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('Ingen kod från Fortnox');
+
+  const redirectUri = `${process.env.WIDGET_BASE_URL}/api/fortnox/callback`;
+  const creds = Buffer.from(`${process.env.FORTNOX_CLIENT_ID}:${process.env.FORTNOX_CLIENT_SECRET}`).toString('base64');
+
+  const r = await fetch('https://apps.fortnox.se/oauth-v1/token', {
+    method:  'POST',
+    headers: { 'Authorization': `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:    new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri }),
+  });
+
+  const data = await r.json();
+  if (!data.refresh_token) return res.status(500).send(`Fortnox-fel: ${JSON.stringify(data)}`);
+
+  res.send(`<!DOCTYPE html><html><body style="font-family:system-ui;padding:48px;color:#111">
+    <h2>Fortnox kopplat!</h2>
+    <p>Kopiera detta refresh token och lägg i din <code>.env</code> som <strong>FORTNOX_REFRESH_TOKEN</strong>:</p>
+    <pre style="background:#f4f4f4;padding:16px;border-radius:8px;word-break:break-all">${data.refresh_token}</pre>
+    <p style="color:#666">Access token (behövs ej spara, förnyas automatiskt):<br>${data.access_token}</p>
+  </body></html>`);
+});
+
+// ── Registrera faktureringskund ────────────────────────────────────────────
+app.post('/api/clients', async (req, res) => {
+  if (process.env.BILLING_SECRET && req.headers['x-billing-secret'] !== process.env.BILLING_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { name, email, is_billing_client = true } = req.body;
+  if (!name || !email) return res.status(400).json({ error: 'name och email krävs' });
+  if (!supabase) return res.status(500).json({ error: 'Supabase ej konfigurerat' });
+
+  const { data, error } = await supabase
+    .from('billing_clients')
+    .insert({ client_name: name, email, is_billing_client })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({
+    ok: true,
+    client_token: data.client_token,
+    webhook_url: `${process.env.WIDGET_BASE_URL}/api/booking-confirmed?client=${data.client_token}`,
+    message: `Ge denna webhook URL till ${name}:s bokningssystem`,
+  });
+});
+
+// ── Lista faktureringskunder ───────────────────────────────────────────────
+app.get('/api/clients', async (req, res) => {
+  if (process.env.BILLING_SECRET && req.headers['x-billing-secret'] !== process.env.BILLING_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabase) return res.json({ clients: [] });
+
+  const { data: clients = [] } = await supabase
+    .from('billing_clients')
+    .select('id, client_name, email, is_billing_client, client_token, fortnox_customer_number, created_at')
+    .order('created_at', { ascending: false });
+
+  const withUrls = clients.map(c => ({
+    ...c,
+    webhook_url: `${process.env.WIDGET_BASE_URL}/api/booking-confirmed?client=${c.client_token}`,
+  }));
+
+  res.json({ clients: withUrls });
+});
+
+// ── Bokningsbekräftelse (webhook från kundens bokningssystem) ──────────────
+app.post('/api/booking-confirmed', async (req, res) => {
+  const { client } = req.query;
+  if (!client) return res.status(400).json({ error: 'Saknar client token' });
+  if (!supabase) return res.status(500).json({ error: 'Supabase ej konfigurerat' });
+
+  const { data: clientData, error } = await supabase
+    .from('billing_clients')
+    .select('*')
+    .eq('client_token', client)
+    .eq('is_billing_client', true)
+    .single();
+
+  if (error || !clientData) return res.status(404).json({ error: 'Kund hittades ej' });
+
+  const now       = new Date();
+  const monthYear = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+  const { error: insertError } = await supabase
+    .from('bookings')
+    .insert({ client_token: client, month_year: monthYear });
+
+  if (insertError) return res.status(500).json({ error: insertError.message });
+
+  console.log(`✓ Bokning registrerad: ${clientData.client_name} (${monthYear})`);
+  res.json({ ok: true });
+});
+
+// ── Månadsfakturering (körs sista dagen i månaden kl 08:00) ───────────────
+async function runMonthlyInvoicing() {
+  if (!supabase) return;
+
+  const now   = new Date();
+  const month = now.getMonth() === 0 ? 12 : now.getMonth();
+  const year  = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  const monthYear = `${year}-${String(month).padStart(2, '0')}`;
+
+  console.log(`⏱  Fakturering: hämtar bokningar för ${monthYear}…`);
+
+  const { data: bookings = [] } = await supabase
+    .from('bookings')
+    .select('client_token')
+    .eq('month_year', monthYear)
+    .is('invoiced_at', null);
+
+  if (!bookings.length) { console.log('  Inga bokningar att fakturera.'); return; }
+
+  const byClient = {};
+  for (const b of bookings) byClient[b.client_token] = (byClient[b.client_token] || 0) + 1;
+
+  for (const [clientToken, count] of Object.entries(byClient)) {
+    try {
+      const { data: client } = await supabase
+        .from('billing_clients').select('*').eq('client_token', clientToken).single();
+
+      if (!client?.is_billing_client) continue;
+
+      let fortnoxCustomerNumber = client.fortnox_customer_number;
+      if (!fortnoxCustomerNumber) {
+        fortnoxCustomerNumber = await ensureCustomer({ name: client.client_name, email: client.email });
+        await supabase.from('billing_clients')
+          .update({ fortnox_customer_number: fortnoxCustomerNumber })
+          .eq('client_token', clientToken);
+      }
+
+      await createAndSendInvoice({ customerNumber: fortnoxCustomerNumber, quantity: count, month, year });
+
+      await supabase.from('bookings')
+        .update({ invoiced_at: new Date().toISOString() })
+        .eq('client_token', clientToken)
+        .eq('month_year', monthYear)
+        .is('invoiced_at', null);
+
+      console.log(`✓ Fakturerat: ${client.client_name} — ${count} möten × 890 kr`);
+    } catch (e) {
+      console.error(`✗ Fakturafel för ${clientToken}:`, e.message);
+    }
+  }
+}
+
+// HTTP-endpoint för manuell körning eller extern cron
+app.post('/api/cron/invoice-monthly', async (req, res) => {
+  if (process.env.CRON_SECRET && req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  await runMonthlyInvoicing();
+  res.json({ ok: true });
+});
+
 // ── Unsubscribe ────────────────────────────────────────────────────────────
 app.get('/api/unsubscribe/:sessionId', async (req, res) => {
   if (supabase) {
@@ -567,6 +735,15 @@ app.listen(PORT, () => {
   if (!process.env.ANTHROPIC_API_KEY) console.warn('⚠  ANTHROPIC_API_KEY not set\n');
   if (!process.env.HIGHLEVEL_API_KEY) console.warn('⚠  HIGHLEVEL_API_KEY not set\n');
   if (!process.env.SUPABASE_URL)      console.warn('⚠  SUPABASE_URL not set — lead recovery disabled\n');
+});
+
+// ── Cron: månadsfakturering (sista dagen i månaden kl 08:00) ──────────────
+cron.schedule('0 8 28-31 * *', async () => {
+  const now     = new Date();
+  const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  if (now.getDate() !== lastDay) return;
+  console.log('⏱  Cron: månadsfakturering startar…');
+  await runMonthlyInvoicing();
 });
 
 // ── Cron: process abandoned leads every 30 minutes ─────────────────────────
