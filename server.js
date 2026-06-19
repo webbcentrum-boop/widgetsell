@@ -579,10 +579,11 @@ app.get('/api/clients', async (req, res) => {
   }
   if (!supabase) return res.json({ clients: [] });
 
-  const { data: clients = [] } = await supabase
+  const { data } = await supabase
     .from('billing_clients')
     .select('id, client_name, email, is_billing_client, client_token, fortnox_customer_number, created_at')
     .order('created_at', { ascending: false });
+  const clients = data || [];
 
   const withUrls = clients.map(c => ({
     ...c,
@@ -687,9 +688,11 @@ async function runMonthlyInvoicing() {
   }
 }
 
-// HTTP-endpoint för manuell körning eller extern cron
+// HTTP-endpoint för manuell körning, extern cron, eller Lovable-trigger
 app.post('/api/cron/invoice-monthly', async (req, res) => {
-  if (process.env.CRON_SECRET && req.headers['x-cron-secret'] !== process.env.CRON_SECRET) {
+  const cronOk    = process.env.CRON_SECRET    && req.headers['x-cron-secret']    === process.env.CRON_SECRET;
+  const billingOk = process.env.BILLING_SECRET && req.headers['x-billing-secret'] === process.env.BILLING_SECRET;
+  if (process.env.CRON_SECRET && process.env.BILLING_SECRET && !cronOk && !billingOk) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   await runMonthlyInvoicing();
