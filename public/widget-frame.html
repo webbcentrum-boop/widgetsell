@@ -1066,6 +1066,8 @@
 
   async function initVoice() {
     if (voiceInited) return; voiceInited = true;
+    playTone();
+    setVState('thinking');
     startViz();
     const reply = await streamAndSpeak([{ role: 'user', content: 'hello' }]);
     if (!voiceInited) return;
@@ -1081,6 +1083,8 @@
   async function initVoiceFromChat() {
     if (voiceInited) { setVState('idle'); startViz(); return; }
     voiceInited = true;
+    playTone();
+    setVState('thinking');
     startViz();
     if (chatHistory.length >= 2) {
       vHistory = [...chatHistory];
