@@ -770,6 +770,7 @@
   orbBody.addEventListener('click', () => {
     if (vState === 'speaking') {
       // Barge-in: interrupt Victoria and start listening
+      playTone();
       if (voiceAbort) voiceAbort.abort();
       interruptAudio();
       setVState('idle');
@@ -778,7 +779,7 @@
     }
     if (micBtn.disabled) return;
     if (vState === 'listening') { stopRecording(); return; }
-    if (vState === 'idle') startRecording(false);
+    if (vState === 'idle') { playTone(); startRecording(false); }
   });
 
   function addVLine(text, role) {
@@ -814,15 +815,20 @@
       const s = sentence.trim();
       if (s.length < 3) return;
       audioQueue.push((async () => {
-        try {
-          const r = await fetch('/api/tts', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: s }),
-            signal: myAbort.signal,
-          });
-          if (!r.ok) return null;
-          return URL.createObjectURL(await r.blob());
-        } catch { return null; }
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const r = await fetch('/api/tts', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: s }),
+              signal: myAbort.signal,
+            });
+            if (r.ok) return URL.createObjectURL(await r.blob());
+          } catch (e) {
+            if (e?.name === 'AbortError') return null;
+          }
+          if (attempt === 0) await new Promise(r => setTimeout(r, 600));
+        }
+        return null;
       })());
     }
 
@@ -871,6 +877,8 @@
       fetchDone = true;
     };
 
+    let audioPlayed = false;
+
     const player = async () => {
       let i = 0;
       while (true) {
@@ -882,7 +890,7 @@
           await new Promise(resolve => {
             audioResolve = () => { URL.revokeObjectURL(url); activeAudio = null; audioResolve = null; resolve(); };
             activeAudio = new Audio(url);
-            activeAudio.play().catch(() => { audioResolve = null; resolve(); });
+            activeAudio.play().then(() => { audioPlayed = true; }).catch(() => { audioResolve = null; resolve(); });
             activeAudio.onended = () => audioResolve?.();
             activeAudio.onerror = () => audioResolve?.();
           });
@@ -896,6 +904,10 @@
 
     setVState('thinking');
     await Promise.all([streamer(), player()]);
+
+    // TTS failed entirely but text arrived — reset state so UI doesn't freeze
+    if (!audioPlayed && fullText && vState === 'thinking') setVState('idle');
+
     return fullText;
   }
 
@@ -1270,8 +1282,8 @@
           const imgEl = document.createElement('img'); imgEl.src = `data:${data.mimeType};base64,${data.imageBase64}`; imgEl.className = 'bubble-img';
           b.appendChild(imgEl); row.appendChild(av); row.appendChild(b); transcriptEl.appendChild(row); transcriptEl.scrollTop = transcriptEl.scrollHeight;
           vHistory.push({ role: 'user', content: `The customer uploaded an image with request: "${text || 'renovate the room'}". Visualization generated. Add a brief comment.` });
-          const reply = await streamToBotLine(vHistory);
-          if (reply) { vHistory.push({ role: 'assistant', content: reply }); setVState('speaking'); await speak(reply); startRecording(true); }
+          const reply = await streamAndSpeak(vHistory);
+          if (reply) { vHistory.push({ role: 'assistant', content: reply }); startRecording(true); }
           else setVState('idle');
         } else { addVLine('Could not generate the image.', 'bot'); setVState('idle'); }
       } catch { addVLine('Image generation failed.', 'bot'); setVState('idle'); }
