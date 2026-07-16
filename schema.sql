@@ -54,3 +54,36 @@ create table if not exists bookings (
 create index if not exists bookings_client_idx   on bookings(client_token);
 create index if not exists bookings_month_idx    on bookings(month_year);
 create index if not exists bookings_invoiced_idx on bookings(invoiced_at);
+
+-- ── Månadsrapporter ──────────────────────────────────────────────────────────
+
+-- Widget-konversationer kopplade till en faktureringskund.
+-- Uppdateras vid varje meddelande via /api/chat (upsert på session_id).
+-- Kräver att kunden konfigurerar clientToken i sin WidgetSellConfig.
+create table if not exists conversations (
+  id               uuid default gen_random_uuid() primary key,
+  session_id       text unique not null,
+  client_token     text references billing_clients(client_token),
+  month_year       text not null,
+  message_count    int  default 0,
+  lead_captured    boolean default false,
+  user_messages    jsonb default '[]',
+  started_at       timestamptz default now(),
+  last_message_at  timestamptz default now()
+);
+
+create index if not exists conv_client_month_idx on conversations(client_token, month_year);
+create index if not exists conv_session_idx      on conversations(session_id);
+
+-- Genererade AI-rapporter — en per kund och månad.
+create table if not exists monthly_reports (
+  id            uuid default gen_random_uuid() primary key,
+  client_token  text not null references billing_clients(client_token),
+  month_year    text not null,
+  report_json   jsonb not null,
+  report_html   text not null,
+  generated_at  timestamptz default now(),
+  unique(client_token, month_year)
+);
+
+create index if not exists reports_client_idx on monthly_reports(client_token);

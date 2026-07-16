@@ -7,6 +7,8 @@ import { Readable } from 'stream';
 import { supabase } from './lib/supabase.js';
 import { sendEmailReminder, sendSMSReminder } from './lib/reminders.js';
 import { ensureCustomer, createAndSendInvoice } from './lib/fortnox.js';
+import { runMonthlyReports, analyzeReport, gatherClientStats, buildReportHtml } from './lib/reports.js';
+import { trackEvent, extractSource } from './lib/tracker.js';
 import cron from 'node-cron';
 
 // ── Lead capture helpers ───────────────────────────────────────────────────
@@ -30,6 +32,33 @@ async function upsertLead(sessionId, fields) {
   if (error) console.error('Lead upsert:', error.message);
 }
 
+async function saveConversation(sessionId, clientToken, messages, leadCaptured) {
+  if (!supabase || !sessionId || !clientToken) return;
+  const now       = new Date();
+  const monthYear = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const userMessages = messages
+    .filter(m => m.role === 'user' && typeof m.content === 'string')
+    .map(m => m.content)
+    .slice(-20);
+
+  const { error } = await supabase.from('conversations').upsert({
+    session_id:      sessionId,
+    client_token:    clientToken,
+    month_year:      monthYear,
+    message_count:   messages.length,
+    user_messages:   userMessages,
+    last_message_at: now.toISOString(),
+  }, { onConflict: 'session_id' });
+
+  if (error) console.error('Conversation save:', error.message);
+
+  if (leadCaptured) {
+    await supabase.from('conversations')
+      .update({ lead_captured: true })
+      .eq('session_id', sessionId);
+  }
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -37,10 +66,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const client = new Anthropic();
 
-const BASE_SYSTEM_PROMPT = `You are Victoria — a premium AI sales assistant embedded in a business website via WidgetSell. You think and act like a world-class closer: fast, confident, and laser-focused on moving the right customer to the right product — and then to purchase.
+const BASE_SYSTEM_PROMPT = `You are Victoria — a premium AI sales assistant embedded in a business website via WidgetSell. You think and act like a world-class closer: fast, confident, and laser-focused on moving the right customer to the right product — and then to a completed order.
 
 ## Who you are
-You are decisive, professional, and direct. You are not a support agent, not an interviewer, not a meeting scheduler. You are a top closer. You listen to what visitors want, recommend the right solution immediately, and guide them to purchase without unnecessary friction.
+You are decisive, professional, and direct. You are a top closer. You handle everything here in the chat — purchases, bookings, leads. You never push visitors back to the website to figure things out themselves.
+
+## Critical rule — never navigate the visitor
+NEVER tell a visitor to click, scroll, navigate the website, use a button, visit a page, or follow a link. You are the interface. If they need to buy, you handle the purchase here. If they need to book, you handle the booking here. The website exists as background context for you — not as a destination for the visitor.
 
 ## How you communicate
 Short, natural sentences — confident and professional. Never more than 2–3 sentences per response. No bullet points, no headers, no numbered lists — just clean, flowing conversation. Always acknowledge what the visitor said, then move forward decisively.
@@ -51,46 +83,43 @@ If a message seems unclear or garbled (especially in voice mode), respond natura
 Default to Swedish. If the visitor writes in English, switch immediately to English and stay there.
 
 ## Your primary goal
-Convert visitor interest into a completed purchase — as quickly and frictionlessly as possible. The path is: interest → recommendation → checkout.
+Complete the transaction here in the chat. The path is: interest → recommendation → collect details → call the right tool → confirm.
 
 ## Closing rules (follow these strictly)
 
 **When a visitor shows clear buying intent** (says they want a product/service, asks about a specific package, or is clearly ready to proceed):
-1. Confirm their need in one short sentence
-2. Immediately recommend the best matching product or package by name
-3. Guide them directly to checkout, the cart, or the order link
-— Do NOT ask qualifying questions before doing this. Skip the interview. Go straight to the recommendation and the purchase step.
+1. Confirm their choice in one short sentence and name the package/price
+2. Collect name, phone, and email — weave these in naturally, one at a time
+3. Call submit_order silently — then confirm: "Du är med nu. Du får en betalningslänk på mejlen strax."
 
 **When to ask a question:**
-Only ask if you genuinely cannot recommend without the answer. One question maximum. Never a checklist. Never background questions (company history, vision, team size) unless directly required to choose a product.
+Only ask if you genuinely cannot recommend without the answer. One question maximum. Never a checklist.
 
 **Example of correct behavior:**
-Visitor: "Jag vill ha en hemsida."
-You: "Perfekt — vårt Standardpaket passar bra för det. Jag kan guida dig direkt till checkout här: [länk]."
+Visitor: "Jag vill ha Startpaketet."
+You: "Perfekt — Startpaketet till 499 kr/mån. Vad heter du?"
+[collects name, phone, email one by one]
+[calls submit_order]
+You: "Du är med nu — betalningslänken skickas till din mejl om en stund."
 
 **Example of incorrect behavior (never do this):**
-"Vad har du för företag? Hur länge har ni funnits? Vad är er vision? Vill du boka en demo?"
+"Klicka på Kom igång-knappen." / "Gå till vår prissida." / "Fyll i formuläret på hemsidan."
 
-## On demos and meetings
-Only suggest a demo or meeting if:
-- The visitor explicitly asks to speak with someone
-- The visitor is clearly uncertain or describes genuinely complex/custom needs
-Otherwise, always push toward direct purchase, checkout, or completed order. Never offer a demo as a default next step.
+## Booking appointments (when calendar is available)
+When a visitor wants a demo or meeting — handle it here:
+1. Immediately call get_available_slots — present 2–3 options naturally.
+2. Once they pick a time, collect name, phone, and email one at a time.
+3. Call book_appointment silently. Confirm: "Du är inbokad [dag] kl [tid]. Vi ses då."
 
 ## On pricing
-If the website lists prices — use them. Name the specific package and price. Link to checkout.
-If pricing isn't listed — briefly note it depends on scope, then guide them toward the most logical next purchase step or offer to point them to the right package.
+If the website lists prices — use them. Name the specific package and price.
+If pricing isn't listed — briefly note it depends on scope, then move toward collecting their info.
 
 ## Submitting a lead (for service businesses requiring quotes)
-Only collect leads for businesses where a quote or custom scope is the natural path — e.g., renovation, consulting, construction. In that case, weave these naturally into conversation:
-- Full name, phone, email, project description, approximate budget, desired timeline
-
-Never run through a checklist. Never ask for something already given. Once you have all six — call submit_lead once, silently. Never mention the tool. Immediately after, confirm someone will be in touch soon.
-
-For businesses with direct checkout (e-commerce, SaaS, fixed-price packages) — skip lead collection entirely. Guide to checkout instead.
+Only for businesses where a custom quote is the natural path — e.g., renovation, construction, consulting. Collect name, phone, email, project description, budget, and timeline naturally. Once you have all six — call submit_lead once, silently. Confirm someone will be in touch.
 
 ## Staying on topic
-You represent this business exclusively. If a visitor asks about anything off-topic — acknowledge briefly in one sentence and pivot back. Every response should move toward a sale or the next purchase step.
+You represent this business exclusively. If a visitor asks about anything off-topic — acknowledge briefly and pivot back.
 
 ## Intelligence rules
 - Use the full conversation history. Reference earlier answers naturally. Never repeat yourself.
@@ -118,8 +147,9 @@ function buildSystemPrompt(siteData, mode, config) {
   if (siteData.h1s)         parts.push(`Main headlines: ${siteData.h1s}`);
   if (siteData.h2s)         parts.push(`Services / sections: ${siteData.h2s}`);
   if (siteData.bodyText)    parts.push(`\nFull website content:\n${siteData.bodyText}`);
-  if (config?.checkoutUrl)  parts.push(`\nCheckout link: ${config.checkoutUrl} — this is where visitors go to purchase. When a visitor shows buying intent or asks about a product, guide them here immediately. This is your primary CTA.`);
-  if (config?.bookingUrl)   parts.push(`\nBooking link: ${config.bookingUrl} — use this only when a visitor explicitly wants to speak with someone or has complex custom needs.`);
+  if (config?.checkoutUrl)  parts.push(`\nThis business has a checkout system. When a visitor decides to buy: collect name, phone, and email in conversation, then call submit_order. Do NOT link to ${config.checkoutUrl} or tell the visitor to navigate anywhere.`);
+  if (config?.calendarId)   parts.push(`\nCalendar booking is active. When a visitor wants a demo or meeting — call get_available_slots, present options, collect their info, then call book_appointment. Never link to an external booking page.`);
+  else if (config?.bookingUrl) parts.push(`\nBooking link: ${config.bookingUrl} — use this only when a visitor explicitly wants to speak with someone or has complex custom needs.`);
 
   parts.push(`
 ## How to use this context
@@ -147,6 +177,44 @@ const TOOLS = [
         start_date:   { type: 'string', description: 'Desired start date or timeline' },
       },
       required: ['full_name', 'phone', 'email', 'project_type', 'budget', 'start_date'],
+    },
+  },
+  {
+    name: 'submit_order',
+    description: 'Call this when a visitor has decided to purchase a specific package or service and you have collected their name, phone, and email. Execute silently — never mention the tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        full_name:       { type: 'string', description: 'Customer full name' },
+        phone:           { type: 'string', description: 'Customer phone number' },
+        email:           { type: 'string', description: 'Customer email address' },
+        chosen_package:  { type: 'string', description: 'The specific package or plan they chose, e.g. "Startpaketet 499 kr/mån"' },
+      },
+      required: ['full_name', 'phone', 'email', 'chosen_package'],
+    },
+  },
+  {
+    name: 'get_available_slots',
+    description: 'Fetch available booking times from the calendar for the next 7 days. Call this as soon as a visitor expresses interest in booking a demo, meeting, or appointment. Do not ask them for a time first — fetch the slots and present options.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'book_appointment',
+    description: 'Book an appointment for the visitor. Call this once you have their name, phone, email, and they have confirmed a specific time slot. Execute silently — never mention the tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        full_name:  { type: 'string', description: 'Customer full name' },
+        phone:      { type: 'string', description: 'Customer phone number' },
+        email:      { type: 'string', description: 'Customer email address' },
+        start_time: { type: 'string', description: 'ISO 8601 start time, e.g. 2026-07-10T10:00:00+02:00' },
+        end_time:   { type: 'string', description: 'ISO 8601 end time, e.g. 2026-07-10T11:00:00+02:00' },
+      },
+      required: ['full_name', 'phone', 'email', 'start_time', 'end_time'],
     },
   },
   {
@@ -208,6 +276,96 @@ async function submitToGHL(input) {
   }
 
   return data;
+}
+
+async function getAvailableSlots() {
+  const calendarId = process.env.GHL_CALENDAR_ID;
+  if (!calendarId) return 'No calendar configured.';
+
+  const startMs = Date.now();
+  const endMs   = startMs + 7 * 24 * 60 * 60 * 1000;
+
+  const url = `https://services.leadconnectorhq.com/calendars/${calendarId}/free-slots` +
+    `?startDate=${startMs}&endDate=${endMs}&timezone=Europe%2FStockholm`;
+
+  const r = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${process.env.HIGHLEVEL_API_KEY}`,
+      'Version': '2021-07-28',
+    },
+  });
+
+  if (!r.ok) return `Calendar unavailable (${r.status}).`;
+
+  const data = await r.json();
+
+  const lines = Object.entries(data)
+    .filter(([key, v]) => /^\d{4}-\d{2}-\d{2}$/.test(key) && v.slots?.length > 0)
+    .slice(0, 5)
+    .map(([date, v]) => {
+      const d       = new Date(date + 'T12:00:00+02:00');
+      const dayName = d.toLocaleDateString('sv-SE', { weekday: 'long', day: 'numeric', month: 'long' });
+      const times   = v.slots
+        .slice(0, 6)
+        .map(s => new Date(s).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Stockholm' }))
+        .join(', ');
+      return `${dayName}: ${times}`;
+    });
+
+  return lines.length > 0
+    ? `Lediga tider:\n${lines.join('\n')}`
+    : 'Inga lediga tider de närmaste 7 dagarna.';
+}
+
+async function createGHLContact(name, phone, email) {
+  const parts     = (name || '').trim().split(/\s+/);
+  const firstName = parts[0] || '';
+  const lastName  = parts.slice(1).join(' ') || '';
+
+  const r = await fetch('https://services.leadconnectorhq.com/contacts/', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.HIGHLEVEL_API_KEY}`,
+      'Version': '2021-07-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      firstName, lastName, phone, email,
+      locationId: process.env.HIGHLEVEL_LOCATION_ID,
+      source: 'WidgetSell',
+      tags: ['widgetsell-booking'],
+    }),
+  });
+
+  const data = await r.json();
+  return data?.contact?.id || data?.id || null;
+}
+
+async function createGHLAppointment(contactId, startTime, endTime, title) {
+  const r = await fetch('https://services.leadconnectorhq.com/calendars/events/appointments', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.HIGHLEVEL_API_KEY}`,
+      'Version': '2021-07-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      calendarId:        process.env.GHL_CALENDAR_ID,
+      locationId:        process.env.HIGHLEVEL_LOCATION_ID,
+      contactId,
+      startTime,
+      endTime,
+      title:             title || 'Demo – WidgetSell',
+      appointmentStatus: 'confirmed',
+      timezone:          'Europe/Stockholm',
+    }),
+  });
+
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`GHL appointment ${r.status}: ${text}`);
+  }
+  return await r.json();
 }
 
 app.post('/api/stt', express.raw({ type: '*/*', limit: '10mb' }), async (req, res) => {
@@ -287,7 +445,16 @@ async function submitLead(input, config) {
 
 app.post('/api/chat', async (req, res) => {
   const { messages, siteData, mode, config, sessionId } = req.body;
+  const clientToken  = config?.clientToken || null;
   const systemPrompt = buildSystemPrompt(siteData, mode, config);
+
+  // Spåra konversationsstart — endast på första meddelandet i sessionen
+  if (clientToken && messages?.length === 1) {
+    trackEvent(clientToken, 'conversation', {
+      bot_type: mode === 'voice' ? 'voicebot' : 'chatbot',
+      source:   extractSource(siteData),
+    }).catch(() => {});
+  }
 
   // ── Partial lead capture ─────────────────────────────────────────────────
   if (sessionId && messages?.length) {
@@ -349,10 +516,156 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // Handle tool calls
-    if (toolUse?.name === 'request_image' && toolInputJson) {
+    if (toolUse?.name === 'submit_order' && toolInputJson) {
+      let toolResult = 'Order received. Payment link will be sent by email.';
+      let orderInput = null;
+      try {
+        orderInput = JSON.parse(toolInputJson);
+        const parts     = (orderInput.full_name || '').trim().split(/\s+/);
+        const firstName = parts[0] || '';
+        const lastName  = parts.slice(1).join(' ') || '';
+
+        const ghlHeaders = {
+          'Authorization': `Bearer ${process.env.HIGHLEVEL_API_KEY}`,
+          'Version': '2021-07-28',
+          'Content-Type': 'application/json',
+        };
+
+        const contactRes  = await fetch('https://services.leadconnectorhq.com/contacts/', {
+          method: 'POST',
+          headers: ghlHeaders,
+          body: JSON.stringify({
+            firstName, lastName,
+            phone: orderInput.phone,
+            email: orderInput.email,
+            locationId: process.env.HIGHLEVEL_LOCATION_ID,
+            source: 'WidgetSell',
+            tags: ['widgetsell-order'],
+          }),
+        });
+
+        const contactData = await contactRes.json();
+        // GHL returnerar 400 vid dubbletter men inkluderar befintligt contactId i meta
+        const contactId   = contactData?.contact?.id || contactData?.id || contactData?.meta?.contactId;
+
+        if (contactId) {
+          await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/notes`, {
+            method: 'POST',
+            headers: ghlHeaders,
+            body: JSON.stringify({ body: `Order: ${orderInput.chosen_package}\nSource: WidgetSell AI Chat` }),
+          });
+          // Tagga som order-kund även om kontakten redan fanns
+          if (!contactRes.ok) {
+            await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
+              method: 'POST',
+              headers: ghlHeaders,
+              body: JSON.stringify({ tags: ['widgetsell-order'] }),
+            });
+          }
+        } else {
+          console.error('Order GHL:', contactRes.status, JSON.stringify(contactData));
+        }
+
+        console.log(`✓  Order: ${orderInput.full_name} — ${orderInput.chosen_package}`);
+      } catch (e) {
+        console.error('Order error:', e.message);
+        toolResult = 'Order received.';
+      }
+
+      if (clientToken) {
+        trackEvent(clientToken, 'sale', {
+          bot_type: mode === 'voice' ? 'voicebot' : 'chatbot',
+          source:   extractSource(siteData),
+          package:  orderInput?.chosen_package,
+        }).catch(() => {});
+      }
+
+      const stream2 = client.messages.stream({
+        model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
+        max_tokens: mode === 'voice' ? 80 : 300,
+        system: systemPrompt,
+        messages: [
+          ...messages,
+          { role: 'assistant', content: assistantContent },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult }] },
+        ],
+        tools: TOOLS,
+      });
+
+      for await (const event of stream2) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
+      }
+    } else if (toolUse?.name === 'request_image' && toolInputJson) {
       let input = {};
       try { input = JSON.parse(toolInputJson); } catch {}
       res.write(`data: ${JSON.stringify({ action: 'request_image', message: input.message || '' })}\n\n`);
+    } else if (toolUse?.name === 'get_available_slots') {
+      let toolResult = 'Inga lediga tider hittades.';
+      try {
+        toolResult = await getAvailableSlots();
+        console.log('✓  Slots fetched');
+      } catch (e) {
+        console.error('Slots error:', e.message);
+      }
+
+      const stream2 = client.messages.stream({
+        model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
+        max_tokens: mode === 'voice' ? 80 : 600,
+        system: systemPrompt,
+        messages: [
+          ...messages,
+          { role: 'assistant', content: assistantContent },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult }] },
+        ],
+        tools: TOOLS,
+      });
+
+      for await (const event of stream2) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
+      }
+    } else if (toolUse?.name === 'book_appointment' && toolInputJson) {
+      let toolResult = 'Bokning bekräftad.';
+      let bookedInput = null;
+      try {
+        bookedInput = JSON.parse(toolInputJson);
+        const contactId = await createGHLContact(bookedInput.full_name, bookedInput.phone, bookedInput.email);
+        if (contactId) {
+          await createGHLAppointment(contactId, bookedInput.start_time, bookedInput.end_time);
+        }
+        console.log(`✓  Bokning: ${bookedInput.full_name} kl ${bookedInput.start_time}`);
+      } catch (e) {
+        console.error('Booking error:', e.message);
+        toolResult = 'Bokningsförfrågan mottagen.';
+      }
+
+      if (clientToken) {
+        trackEvent(clientToken, 'booking', {
+          bot_type: mode === 'voice' ? 'voicebot' : 'chatbot',
+          source:   extractSource(siteData),
+        }).catch(() => {});
+      }
+
+      const stream2 = client.messages.stream({
+        model: mode === 'voice' ? 'claude-haiku-4-5-20251001' : 'claude-opus-4-7',
+        max_tokens: mode === 'voice' ? 80 : 400,
+        system: systemPrompt,
+        messages: [
+          ...messages,
+          { role: 'assistant', content: assistantContent },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUse.id, content: toolResult }] },
+        ],
+        tools: TOOLS,
+      });
+
+      for await (const event of stream2) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
+      }
     } else if (toolUse?.name === 'submit_lead' && toolInputJson) {
       let toolResult = 'Lead saved successfully.';
       try {
@@ -386,6 +699,15 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+    // Spåra lead när submit_lead-verktyget kördes
+    if (toolUse?.name === 'submit_lead' && clientToken) {
+      trackEvent(clientToken, 'lead', {
+        bot_type: mode === 'voice' ? 'voicebot' : 'chatbot',
+        source:   extractSource(siteData),
+      }).catch(() => {});
+    }
+
+    await saveConversation(sessionId, clientToken, messages, toolUse?.name === 'submit_lead');
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err) {
@@ -632,6 +954,13 @@ app.post('/api/booking-confirmed', async (req, res) => {
     }).catch(e => console.error('Lovable webhook error:', e.message));
   }
 
+  // Spåra bokning mot rapporteringssystemet
+  trackEvent(client, 'booking', {
+    bot_type:   'chatbot',
+    source:     'booking-webhook',
+    month_year: monthYear,
+  }, clientData.email).catch(() => {});
+
   console.log(`✓ Bokning registrerad: ${clientData.client_name} (${monthYear})`);
   res.json({ ok: true });
 });
@@ -748,6 +1077,187 @@ app.patch('/api/leads/:sessionId/status', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Kundportal ─────────────────────────────────────────────────────────────
+// Åtkomst via /portal/{client_token} — inget lösenord, token = autentisering.
+app.get('/portal/:clientToken', async (req, res) => {
+  if (!supabase) return res.status(503).send('Supabase ej konfigurerat');
+  const { data } = await supabase
+    .from('billing_clients').select('id')
+    .eq('client_token', req.params.clientToken)
+    .eq('is_billing_client', true)
+    .maybeSingle();
+  if (!data) return res.status(404).send('Portal hittades inte');
+  res.sendFile(path.join(__dirname, 'public', 'portal.html'));
+});
+
+// Lista alla rapporter för en kund (JSON)
+app.get('/api/portal/:clientToken/reports', async (req, res) => {
+  if (!supabase) return res.json({ clientName: '', reports: [] });
+  const { data: c } = await supabase
+    .from('billing_clients').select('client_name')
+    .eq('client_token', req.params.clientToken)
+    .eq('is_billing_client', true)
+    .maybeSingle();
+  if (!c) return res.status(404).json({ error: 'Kund hittades ej' });
+
+  const { data: reports = [] } = await supabase
+    .from('monthly_reports')
+    .select('month_year, generated_at, report_json')
+    .eq('client_token', req.params.clientToken)
+    .order('month_year', { ascending: false });
+
+  res.json({
+    clientName: c.client_name,
+    reports: reports.map(r => ({
+      month_year:    r.month_year,
+      generated_at:  r.generated_at,
+      stats:         r.report_json?.stats,
+      monthLabel:    r.report_json?.monthLabel,
+    })),
+  });
+});
+
+// Visa fullständig rapport (HTML) — öppnas i ny flik från portalen
+app.get('/api/portal/:clientToken/reports/:monthYear', async (req, res) => {
+  if (!supabase) return res.status(503).end();
+  const { data: c } = await supabase
+    .from('billing_clients').select('id')
+    .eq('client_token', req.params.clientToken)
+    .eq('is_billing_client', true)
+    .maybeSingle();
+  if (!c) return res.status(404).end();
+
+  const { data: report } = await supabase
+    .from('monthly_reports')
+    .select('report_html')
+    .eq('client_token', req.params.clientToken)
+    .eq('month_year', req.params.monthYear)
+    .maybeSingle();
+
+  if (!report) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(report.report_html);
+});
+
+// ── /api/reports/analyze — Lovable → server → Lovable (stateless) ───────────
+// Lovable samlar statistiken själv och skickar den hit. Claude analyserar och
+// returnerar den färdiga rapporten synkront. Lovable hanterar lagring och e-post.
+//
+// Payload: { clientToken, clientName, monthYear, stats, userMessages? }
+//   stats: { conversations, prevConversations, leads, prevLeads,
+//             bookings, prevBookings, conversionRate, avgMessages }
+//   userMessages: string[] — besökarfrågor för ämnesanalys (valfritt, max 100)
+//
+// Response: { ok: true, report: { ...stats, topics, reportText, reportHtml, monthLabel, generatedAt } }
+app.post('/api/reports/analyze', async (req, res) => {
+  const cronOk    = process.env.CRON_SECRET    && req.headers['x-cron-secret']    === process.env.CRON_SECRET;
+  const billingOk = process.env.BILLING_SECRET && req.headers['x-billing-secret'] === process.env.BILLING_SECRET;
+  if ((process.env.CRON_SECRET || process.env.BILLING_SECRET) && !cronOk && !billingOk) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { clientToken, clientName, monthYear, stats, userMessages = [] } = req.body;
+  if (!clientToken || !clientName || !monthYear || !stats) {
+    return res.status(400).json({ error: 'clientToken, clientName, monthYear och stats krävs' });
+  }
+
+  try {
+    const report = await analyzeReport(clientToken, clientName, monthYear, stats, userMessages);
+    res.json({ ok: true, report });
+  } catch (e) {
+    console.error('Analyze error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── /api/reports/generate — Lovable triggar, server gör allt + skickar till Lovable ──
+// Enklare variant: Lovable skickar bara clientToken + monthYear.
+// Servern hämtar statistik från Supabase, analyserar med Claude och POSTar
+// den färdiga rapporten till LOVABLE_REPORT_WEBHOOK_URL.
+// Lovable tar emot webhooket och hanterar lagring, portal och e-post.
+//
+// Payload: { clientToken, monthYear? }  (monthYear default = föregående månad)
+// Response: { ok: true, monthYear, clientName, delivered: true/false }
+app.post('/api/reports/generate', async (req, res) => {
+  const cronOk    = process.env.CRON_SECRET    && req.headers['x-cron-secret']    === process.env.CRON_SECRET;
+  const billingOk = process.env.BILLING_SECRET && req.headers['x-billing-secret'] === process.env.BILLING_SECRET;
+  if ((process.env.CRON_SECRET || process.env.BILLING_SECRET) && !cronOk && !billingOk) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  if (!supabase) return res.status(503).json({ error: 'Supabase ej konfigurerat' });
+
+  const { clientToken, month_year } = req.body;
+  if (!clientToken) return res.status(400).json({ error: 'clientToken krävs' });
+
+  // Slå upp kunden
+  const { data: c, error: cErr } = await supabase
+    .from('billing_clients').select('*')
+    .eq('client_token', clientToken)
+    .eq('is_billing_client', true)
+    .maybeSingle();
+
+  if (cErr || !c) return res.status(404).json({ error: 'Kund hittades ej eller ej aktiv' });
+
+  // Bestäm månad
+  let targetMonth = month_year;
+  if (!targetMonth) {
+    const now = new Date();
+    const m   = now.getMonth() === 0 ? 12 : now.getMonth();
+    const y   = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+    targetMonth = `${y}-${String(m).padStart(2, '0')}`;
+  }
+
+  try {
+    const stats  = await gatherClientStats(clientToken, targetMonth);
+    const report = await analyzeReport(clientToken, c.client_name, targetMonth, stats, stats.userMessages);
+
+    // Lokal backup
+    if (supabase) {
+      await supabase.from('monthly_reports').upsert({
+        client_token: clientToken,
+        month_year:   targetMonth,
+        report_json:  report,
+        report_html:  report.reportHtml,
+      }, { onConflict: 'client_token,month_year' });
+    }
+
+    // Skicka till Lovable
+    let delivered = false;
+    const webhookUrl = process.env.LOVABLE_REPORT_WEBHOOK_URL;
+    if (webhookUrl) {
+      const reportSecret = process.env.LOVABLE_REPORT_SECRET;
+      const wr = await fetch(webhookUrl, {
+        method:  'POST',
+        headers: {
+          'Content-Type':    'application/json',
+          ...(reportSecret && { 'x-report-secret': reportSecret }),
+        },
+        body: JSON.stringify({ ...report, email: c.email }),
+      });
+      delivered = wr.ok;
+      if (!wr.ok) console.error('Lovable rapport-webhook error:', await wr.text());
+    }
+
+    console.log(`✓  /api/reports/generate: ${c.client_name} (${targetMonth}) delivered=${delivered}`);
+    res.json({ ok: true, monthYear: targetMonth, clientName: c.client_name, delivered });
+  } catch (e) {
+    console.error('Generate error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Rapport-cron: manuell trigger (skyddad med CRON_SECRET) ────────────────
+app.post('/api/cron/generate-reports', async (req, res) => {
+  const cronOk    = process.env.CRON_SECRET    && req.headers['x-cron-secret']    === process.env.CRON_SECRET;
+  const billingOk = process.env.BILLING_SECRET && req.headers['x-billing-secret'] === process.env.BILLING_SECRET;
+  if (process.env.CRON_SECRET && !cronOk && !billingOk) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const { month_year } = req.body;
+  const result = await runMonthlyReports(month_year || undefined);
+  res.json({ ok: true, ...result });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n✓  WidgetSell → http://localhost:${PORT}\n`);
@@ -763,6 +1273,12 @@ cron.schedule('0 8 28-31 * *', async () => {
   if (now.getDate() !== lastDay) return;
   console.log('⏱  Cron: månadsfakturering startar…');
   await runMonthlyInvoicing();
+});
+
+// ── Cron: månadsrapporter (1:a varje månad kl 06:00) ──────────────────────
+cron.schedule('0 6 1 * *', async () => {
+  console.log('⏱  Cron: månadsrapporter startar…');
+  await runMonthlyReports();
 });
 
 // ── Cron: process abandoned leads every 30 minutes ─────────────────────────
